@@ -6,6 +6,7 @@ import warnings
 from IPython.display import Audio
 from pathlib import Path
 from typing import Optional, Union
+import matplotlib.pyplot as plt
 
 class CQTProcessor:
     """A class for consistent Constant-Q Transform processing with ML integration.
