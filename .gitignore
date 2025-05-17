@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Audio files
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.m4a
+
+# Large dataset files
+datasets/
+dataset_samples/
+raw_data/
+
+# Cache directories
+.cache/
+.cache*/
+freemusic.cache/
+cached_data/
+*.cache
+
+# Logs and results
+logs/
+log*/
+*.log
+results/
+output/
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Data files
+*.csv
+*.tsv
+*.json
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# ML model files
+*.pt
+*.pth
+*.h5
+*.onnx
+*.savedmodel
+checkpoints/
+models/
+pretrained/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.venv
+.coverage
+htmlcov/
+
+# Project specific
+**/temp/
+**/tmp/ 
