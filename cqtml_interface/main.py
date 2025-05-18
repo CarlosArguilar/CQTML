@@ -4,9 +4,9 @@ import argparse
 import torch
 import numpy as np
 
-from src.ui.theme import COLORS, SIZES
-from src.ui.screens.visualization import VisualizationScreen
-from src.ui.screens.comparison import ComparisonScreen
+from cqtml_interface.src.ui.theme import COLORS, SIZES
+from cqtml_interface.src.ui.screens.visualization import VisualizationScreen
+from cqtml_interface.src.ui.screens.comparison import ComparisonScreen
 
 
 class SignalVisualizerApp:
@@ -34,6 +34,10 @@ class SignalVisualizerApp:
         
         # Current mode
         self.current_mode = "visualization"  # or "comparison"
+        
+        # For API usage
+        self.force_exit = False
+        self.selection_made = False
         
     def set_visualization_mode(self, signal_tensor, audio_tensor, duration=None, 
                               sample_rate=44100, max_value=1.0):
@@ -68,18 +72,40 @@ class SignalVisualizerApp:
             selection_callback (function, optional): Callback when a signal is selected
         """
         self.current_mode = "comparison"
+        
+        # Wrap the selection callback to track when a selection is made
+        original_callback = selection_callback
+        
+        def wrapped_callback(selection):
+            self.selection_made = True
+            if original_callback:
+                original_callback(selection)
+        
         self.comparison_screen.set_data(
             signal_tensor_left, signal_tensor_right, audio_tensor,
-            duration, sample_rate, max_value, selection_callback
+            duration, sample_rate, max_value, wrapped_callback
         )
         
-    def run(self):
-        """Run the main application loop"""
+    def run(self, exit_on_callback=False):
+        """
+        Run the main application loop
+        
+        Args:
+            exit_on_callback (bool): Whether to exit the application after a selection is made
+        """
         running = True
         
         while running:
             # Calculate delta time
             dt = self.clock.tick(self.fps) / 1000.0
+            
+            # Check for force exit
+            if self.force_exit:
+                running = False
+            
+            # Check if a selection was made and we should exit
+            if exit_on_callback and self.selection_made:
+                running = False
             
             # Handle events
             for event in pygame.event.get():

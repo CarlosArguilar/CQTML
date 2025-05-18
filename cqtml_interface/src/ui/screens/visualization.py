@@ -34,9 +34,9 @@ class VisualizationScreen:
         
     def _init_components(self):
         """Initialize UI components"""
-        # Play/pause button
+        # Play/pause button - positioned at the bottom center
         button_x = (self.screen_width // 2) - (SIZES['button_width'] // 2)
-        button_y = self.screen_height - SIZES['button_height'] - SIZES['padding'] * 3
+        button_y = self.screen_height - SIZES['button_height'] - SIZES['controls_padding_bottom']
         self.play_button = Button(
             button_x, 
             button_y, 
@@ -46,9 +46,9 @@ class VisualizationScreen:
             style="primary"
         )
         
-        # Timeline
+        # Timeline - positioned above the play button
         timeline_y = button_y - SIZES['timeline_height'] - SIZES['padding'] * 2
-        timeline_width = self.screen_width - SIZES['padding'] * 4
+        timeline_width = int(self.screen_width * 0.7)  # 70% of screen width
         timeline_x = (self.screen_width - timeline_width) // 2
         self.timeline = Timeline(
             timeline_x,
@@ -58,13 +58,16 @@ class VisualizationScreen:
             on_seek=self._on_seek
         )
         
-        # Device renderer
-        devices_x = self.screen_width // 2
-        devices_y = self.screen_height // 2 - SIZES['device_circle_radius']
+        # Device renderer - centered horizontally with proper vertical position
+        # Calculate starting x position to center all devices
+        n_default_devices = 4
+        total_width = (n_default_devices - 1) * SIZES['device_circle_spacing']
+        start_x = (self.screen_width - total_width) // 2
+        
         self.device_renderer = DeviceRenderer(
-            devices_x,
-            devices_y,
-            4,  # Default number of devices
+            start_x,
+            SIZES['content_padding_top'] + SIZES['device_circle_y'],
+            n_default_devices,
             horizontal=True
         )
         
@@ -97,6 +100,12 @@ class VisualizationScreen:
         # Update device renderer
         self.device_renderer.set_signal_processor(self.signal_processor)
         
+        # Update device renderer position to center all devices
+        n_devices = self.signal_processor.n_devices
+        total_width = (n_devices - 1) * SIZES['device_circle_spacing']
+        start_x = (self.screen_width - total_width) // 2
+        self.device_renderer.set_position(start_x, SIZES['content_padding_top'] + SIZES['device_circle_y'])
+        
         # Pause playback if active
         if self.playing:
             self._toggle_playback()
@@ -111,17 +120,29 @@ class VisualizationScreen:
         if not self.audio_processor:
             return
             
+        # Check if audio was playing but has stopped (reached the end)
+        was_playing = self.playing
+        
         # Update playback state
         self.playing = self.audio_processor.playing
+        
+        # Get current progress to check if we're near the end
+        current_time = self.audio_processor.get_current_time()
+        duration = self.audio_processor.duration
+        
+        # Check if the audio has just finished (was playing but now stopped AND we're near the end)
+        # Only reset if we were near the end when playback stopped (natural finish)
+        if was_playing and not self.playing and current_time > (duration * 0.98):
+            # Reset to beginning only if we actually reached the end
+            self.audio_processor.set_time(0)
         
         # Update button text based on playback state
         self.play_button.set_text("Pause" if self.playing else "Play")
         self.play_button.set_toggled(self.playing)
         
         # Update timeline
-        current_time = self.audio_processor.get_current_time()
         progress = self.audio_processor.get_progress()
-        self.timeline.update_progress(progress, current_time, self.audio_processor.duration)
+        self.timeline.update_progress(progress, current_time, duration)
         
         # Update device values
         self.device_renderer.update_values(current_time)
@@ -141,7 +162,7 @@ class VisualizationScreen:
         title_font = pygame.font.SysFont(font_name, font_size, bold)
         title_surface = title_font.render(self.title, True, COLORS['text'])
         title_x = (self.screen_width - title_surface.get_width()) // 2
-        title_y = SIZES['padding'] * 2
+        title_y = SIZES['title_padding_top']
         surface.blit(title_surface, (title_x, title_y))
         
         # Draw device renderer

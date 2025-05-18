@@ -51,15 +51,20 @@ SIZES = {
     'padding': 15,
     'margin': 10,
     
-    # Device circles
-    'device_circle_radius': 50,
-    'device_circle_spacing': 120,
-    'device_circle_y': 300,  # Vertical position
+    # Device circles - adjusted for better spacing
+    'device_circle_radius': 40,      # Slightly smaller circles
+    'device_circle_spacing': 150,    # More space between circles
+    'device_circle_y': 250,          # Higher vertical position
     
     # Timeline
     'timeline_height': 30,
     'timeline_marker_width': 4,
     'timeline_marker_height': 20,
+    
+    # Content spacing
+    'title_padding_top': 30,         # Space between top and title
+    'content_padding_top': 100,      # Space between top and main content
+    'controls_padding_bottom': 40,   # Space from bottom for controls
 }
 
 # Fonts

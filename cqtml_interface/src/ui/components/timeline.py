@@ -35,17 +35,17 @@ class Timeline:
         
     def update_surface(self):
         """Update the timeline's appearance based on state"""
-        # Create timeline surface
-        self.surface = pygame.Surface((self.width, self.height + 20), pygame.SRCALPHA)
+        # Create timeline surface with more space for the time text
+        self.surface = pygame.Surface((self.width, self.height + 25), pygame.SRCALPHA)
         
         # Draw background
-        bg_rect = pygame.Rect(0, 10, self.width, self.height)
+        bg_rect = pygame.Rect(0, 0, self.width, self.height)
         pygame.draw.rect(self.surface, COLORS['dark_panel'], bg_rect, border_radius=self.height // 2)
         
         # Draw progress bar
         progress_width = int(self.width * self.progress)
         if progress_width > 0:
-            progress_rect = pygame.Rect(0, 10, progress_width, self.height)
+            progress_rect = pygame.Rect(0, 0, progress_width, self.height)
             pygame.draw.rect(self.surface, COLORS['primary'], progress_rect, 
                              border_radius=self.height // 2)
         
@@ -53,7 +53,7 @@ class Timeline:
         marker_x = int(self.width * self.progress)
         marker_width = SIZES['timeline_marker_width']
         marker_height = SIZES['timeline_marker_height']
-        marker_y = 10 + (self.height - marker_height) // 2
+        marker_y = (self.height - marker_height) // 2
         
         marker_rect = pygame.Rect(marker_x - marker_width // 2, marker_y, 
                                   marker_width, marker_height)
@@ -65,9 +65,9 @@ class Timeline:
         font = pygame.font.SysFont(font_name, font_size)
         time_surf = font.render(self.time_text, True, COLORS['text'])
         
-        # Position text below the timeline
+        # Position text below the timeline with more space
         time_x = (self.width - time_surf.get_width()) // 2
-        time_y = self.height + 12
+        time_y = self.height + 5
         self.surface.blit(time_surf, (time_x, time_y))
         
     def update_progress(self, progress, current_time=None, total_time=None):
@@ -112,7 +112,7 @@ class Timeline:
         
         # Check if mouse is over timeline
         if (self.x <= pos[0] <= self.x + self.width and 
-            self.y <= pos[1] <= self.y + self.height + 20):
+            self.y <= pos[1] <= self.y + self.height + 25):
             
             # Handle mouse press
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:

@@ -51,31 +51,14 @@ class SignalProcessor:
         if self.duration is None:
             raise ValueError("Duration must be set to get value at specific time")
             
-        # Convert time to index with interpolation
+        # Convert time to index WITHOUT interpolation
         time_ratio = time_sec / self.duration
-        timestep_float = time_ratio * (self.n_timesteps - 1)
-        
-        # Use linear interpolation between timesteps
-        timestep_low = int(np.floor(timestep_float))
-        timestep_high = int(np.ceil(timestep_float))
-        
-        # Handle edge case at the end of the timeline
-        if timestep_high >= self.n_timesteps:
-            timestep_high = self.n_timesteps - 1
-            
-        # Calculate interpolation weight
-        if timestep_low == timestep_high:
-            weight = 0
-        else:
-            weight = timestep_float - timestep_low
+        # Calculate the exact timestep index (integer)
+        timestep = min(int(time_ratio * self.n_timesteps), self.n_timesteps - 1)
             
         if self.has_color:
             # RGB values with alpha
-            low_value = self.signal_tensor[device_idx, timestep_low].cpu().numpy()
-            high_value = self.signal_tensor[device_idx, timestep_high].cpu().numpy()
-            
-            # Interpolate
-            value = (1 - weight) * low_value + weight * high_value
+            value = self.signal_tensor[device_idx, timestep].cpu().numpy()
             
             # Split into RGB and alpha
             if value.shape[0] >= 3:
@@ -91,11 +74,9 @@ class SignalProcessor:
             return tuple(rgb), alpha
         else:
             # Monochrome value (only alpha)
-            low_value = self.signal_tensor[device_idx, timestep_low].item()
-            high_value = self.signal_tensor[device_idx, timestep_high].item()
+            value = self.signal_tensor[device_idx, timestep].item()
             
-            # Interpolate and normalize
-            value = (1 - weight) * low_value + weight * high_value
+            # Normalize without interpolation
             alpha = float(max(0, min(1, value / self.max_value)))
             
             return (0, 0, 1), alpha  # Default blue with varying alpha

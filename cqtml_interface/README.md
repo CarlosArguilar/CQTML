@@ -13,6 +13,7 @@ This interface allows visualization of signal data from multiple devices with sy
 - **Interactive Timeline**: Seek through the signal/audio with a draggable timeline
 - **Play/Pause Control**: Control audio playback
 - **Best Signal Selection**: In comparison mode, select which signal is preferred
+- **Improved Visual Design**: Clean layout with proper spacing and alignment of UI elements
 
 ## Requirements
 
@@ -77,6 +78,15 @@ python examples/test_comparison.py --color
 - **Timeline**: Click or drag the timeline to seek through the signal/audio
 - **Escape Key**: Press ESC to exit the application
 - **Selection Buttons**: In comparison mode, click "Select Left" or "Select Right" to choose the best signal
+
+## Visual Design
+
+The interface has been designed with careful attention to:
+- Proper alignment and spacing of UI elements
+- Visual hierarchy to focus on important content
+- Consistent color scheme for intuitive understanding
+- Clear device visualization with 3D effect and glow
+- Device labels for easy identification
 
 ## API Usage
 

@@ -1,6 +1,6 @@
 import pygame
 import numpy as np
-from ...ui.theme import COLORS, SIZES
+from ...ui.theme import COLORS, SIZES, FONTS
 
 
 class DeviceRenderer:
@@ -55,53 +55,48 @@ class DeviceRenderer:
             
     def _update_device_surface(self, device_idx):
         """Update the surface for a specific device"""
-        # Create surface for device with padding for glow effect
-        padding = int(self.radius * 0.5)
-        size = (self.radius + padding) * 2
+        # Create surface for device without extra padding for glow
+        size = self.radius * 2
         surface = pygame.Surface((size, size), pygame.SRCALPHA)
         
         # Get base color for this device
         base_color = self.colors[device_idx]
         
-        # Draw outer glow (if value > 0)
-        if self.values[device_idx] > 0:
-            # Calculate glow radius and alpha
-            glow_radius = self.radius + padding * self.values[device_idx]
-            glow_alpha = int(100 * self.values[device_idx])
-            
-            # Create a glow color with alpha
-            glow_color = (*base_color, glow_alpha)
-            
-            # Draw glow circle
+        # Get device value (0 to 1)
+        value = self.values[device_idx]
+        
+        # For an OFF state (value near 0), use black
+        if value < 0.5:
+            # Draw a black circle (device off)
             pygame.draw.circle(
                 surface,
-                glow_color,
+                (0, 0, 0),  # Black
                 (size // 2, size // 2),
-                glow_radius
+                self.radius
             )
-            
-        # Draw device base
-        pygame.draw.circle(
-            surface,
-            base_color,
-            (size // 2, size // 2),
-            self.radius
-        )
-        
-        # Draw inner circle with varying brightness
-        inner_color = self._get_brightness_color(base_color, self.values[device_idx])
-        inner_radius = int(self.radius * 0.8)
-        
-        pygame.draw.circle(
-            surface,
-            inner_color,
-            (size // 2, size // 2),
-            inner_radius
-        )
+        else:
+            # For an ON state (value >= 0.5), use the full color
+            pygame.draw.circle(
+                surface,
+                base_color,
+                (size // 2, size // 2),
+                self.radius
+            )
         
         # Store the surface
         self.surfaces[device_idx] = surface
         
+    def _get_rim_color(self, base_color, value):
+        """Get color for the outer rim based on value"""
+        if value < 0.1:
+            # Darker rim for inactive devices
+            factor = 0.5
+            return tuple(int(c * factor) for c in base_color)
+        else:
+            # Brighter rim for active devices
+            factor = min(1.5, 1.0 + value * 0.5)
+            return tuple(min(255, int(c * factor)) for c in base_color)
+    
     def _get_brightness_color(self, base_color, value):
         """
         Get a color with adjusted brightness based on value.
@@ -113,15 +108,20 @@ class DeviceRenderer:
         Returns:
             tuple: Adjusted RGB color
         """
-        # For low values, darken the color
+        # For low values, keep the same as base color to avoid gray appearance
         if value < 0.3:
-            factor = 0.3 + 0.7 * value / 0.3  # 0.3 to 1.0
-            return tuple(int(c * factor) for c in base_color)
+            return base_color
         
         # For high values, make it brighter (towards white)
         else:
             factor = (value - 0.3) / 0.7  # 0 to 1.0
             return tuple(int(c + (255 - c) * factor) for c in base_color)
+            
+    def _get_highlight_color(self, base_color, value):
+        """Get color for the highlight spot"""
+        # Always white-ish, but alpha based on value
+        alpha = int(150 * min(1.0, value * 1.5))
+        return (255, 255, 255, alpha)
             
     def update_values(self, current_time):
         """
@@ -157,6 +157,10 @@ class DeviceRenderer:
         Args:
             surface (pygame.Surface): Surface to draw on
         """
+        # Add device labels
+        font_name, font_size = FONTS['small']
+        font = pygame.font.SysFont(font_name, font_size)
+        
         for i in range(self.n_devices):
             # Calculate position for this device
             if self.horizontal:
@@ -176,6 +180,13 @@ class DeviceRenderer:
             
             # Draw the device
             surface.blit(dev_surface, (draw_x, draw_y))
+            
+            # Draw device label below the circle
+            label_text = f"Device {i+1}"
+            label_surface = font.render(label_text, True, COLORS['text_secondary'])
+            label_x = pos_x - label_surface.get_width() // 2
+            label_y = pos_y + self.radius + 10
+            surface.blit(label_surface, (label_x, label_y))
             
     def set_position(self, x, y):
         """
