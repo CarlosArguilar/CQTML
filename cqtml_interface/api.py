@@ -112,7 +112,7 @@ def compare_signals(
     audio_tensor: torch.Tensor,
     signal_tensor_a: torch.Tensor,
     signal_tensor_b: torch.Tensor,
-    sample_rate: int = 44100,
+    sample_rate: int = 22050,
     duration: Optional[float] = None,
     max_value: float = 1.0,
     timeout: Optional[float] = None

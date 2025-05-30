@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import timm
 import types
 
@@ -10,7 +11,8 @@ class CQTViTModel:
     @staticmethod
     def create_model(cqt_shape, num_devices=4, patch_size=16, 
                     use_8bit=False, use_half_precision=False, 
-                    gradient_checkpointing=False, device='auto'):
+                    gradient_checkpointing=False, device='auto',
+                    stochastic_inference=True, dropout_prob=0.1):
         """
         Create a ViT model adapted for CQT data with resource efficiency options
         
@@ -22,6 +24,8 @@ class CQTViTModel:
             use_half_precision: Use FP16 for faster inference (default: False)
             gradient_checkpointing: Enable gradient checkpointing to save memory (default: False)
             device: Device placement ('auto', 'cpu', 'cuda', 'mps') (default: 'auto')
+            stochastic_inference: Enable stochastic generation during inference (default: True)
+            dropout_prob: Dropout probability for stochastic inference (default: 0.1)
             
         Returns:
             Modified ViT model ready for CQT inference
@@ -56,11 +60,22 @@ class CQTViTModel:
         # Resize positional embeddings
         CQTViTModel._resize_pos_embeddings(model)
         
-        # Replace classification head
-        model.head = nn.Linear(model.head.in_features, num_devices)
+        # Replace classification head with stochastic head
+        if stochastic_inference:
+            model.head = CQTViTModel.StochasticHead(model.head.in_features, num_devices, dropout_prob)
+        else:
+            model.head = nn.Linear(model.head.in_features, num_devices)
+        
+        # Add stochastic inference parameters
+        model.stochastic_inference = stochastic_inference
+        model.dropout_prob = dropout_prob
         
         # Replace forward method
         model.forward = types.MethodType(CQTViTModel._forward_cqt, model)
+        
+        # Add generation methods
+        model.generate_deterministic = types.MethodType(CQTViTModel._generate_deterministic, model)
+        model.generate_stochastic = types.MethodType(CQTViTModel._generate_stochastic, model)
         
         # Apply resource efficiency optimizations
         model = CQTViTModel._apply_optimizations(
@@ -71,10 +86,36 @@ class CQTViTModel:
         print(f"  - 8-bit quantization: {use_8bit}")
         print(f"  - Half precision: {use_half_precision}")
         print(f"  - Gradient checkpointing: {gradient_checkpointing}")
+        print(f"  - Stochastic inference: {stochastic_inference}")
         print(f"  - Model size: {CQTViTModel.get_model_memory_usage(model):.1f} MB")
         
         return model
     
+    class StochasticHead(nn.Module):
+        """Stochastic head that enables probabilistic outputs during inference"""
+        
+        def __init__(self, in_features, out_features, dropout_prob=0.1):
+            super().__init__()
+            self.linear = nn.Linear(in_features, out_features)
+            self.dropout = nn.Dropout(dropout_prob)
+            self.dropout_prob = dropout_prob
+            
+        def forward(self, x, temperature=1.0, stochastic=True):
+            # Apply dropout during inference if stochastic mode is enabled
+            if stochastic and self.training:
+                x = self.dropout(x)
+            elif stochastic and not self.training:
+                # Apply dropout even during eval if stochastic inference is requested
+                x = F.dropout(x, p=self.dropout_prob, training=True)
+            
+            logits = self.linear(x)
+            
+            if stochastic and temperature != 1.0:
+                # Apply temperature scaling for sampling
+                logits = logits / temperature
+            
+            return logits
+
     @staticmethod
     def _resize_pos_embeddings(model):
         """Resize positional embeddings to match new patch count"""
@@ -108,9 +149,13 @@ class CQTViTModel:
             model.pos_embed = nn.Parameter(torch.cat([class_token, new_patch_embeddings], dim=1))
     
     @staticmethod
-    def _forward_cqt(self, x):
-        """Custom forward method for CQT data"""
+    def _forward_cqt(self, x, temperature=1.0, stochastic=None):
+        """Custom forward method for CQT data with stochastic generation"""
         T = x.shape[-1]  # Get time dimension
+        
+        # Determine if we should use stochastic mode
+        if stochastic is None:
+            stochastic = getattr(self, 'stochastic_inference', False)
         
         # Convert to same dtype as model if using half precision
         if next(self.parameters()).dtype == torch.float16:
@@ -118,13 +163,51 @@ class CQTViTModel:
         
         # Standard ViT forward pass
         x = self.forward_features(x)  # [batch_size, num_patches, embed_dim]
-        x = self.head(x)  # [batch_size, num_patches, num_devices]
+        
+        # Pass through head with stochastic options
+        if hasattr(self.head, 'forward') and hasattr(self.head, 'dropout_prob'):
+            # Stochastic head
+            x = self.head(x, temperature=temperature, stochastic=stochastic)
+        else:
+            # Regular head
+            x = self.head(x)
         
         # Reshape to target format [batch_size, num_devices, T]
         x = x.transpose(1, 2)  # [batch_size, num_devices, num_patches]
         x = nn.functional.interpolate(x, size=T, mode='linear', align_corners=False)
         
-        return x 
+        # Apply sampling if in stochastic mode and temperature != 1.0
+        if stochastic and temperature != 1.0:
+            # Sample from the distribution using Gumbel sampling for continuous outputs
+            x = CQTViTModel._sample_gumbel_continuous(x, temperature)
+        
+        return x
+    
+    @staticmethod
+    def _generate_deterministic(self, x):
+        """Generate deterministic output (standard forward pass)"""
+        return self.forward(x, temperature=1.0, stochastic=False)
+    
+    @staticmethod
+    def _generate_stochastic(self, x, temperature=1.0, num_samples=1):
+        """Generate stochastic outputs with temperature sampling"""
+        if num_samples == 1:
+            return self.forward(x, temperature=temperature, stochastic=True)
+        
+        # Generate multiple samples
+        samples = []
+        for _ in range(num_samples):
+            sample = self.forward(x, temperature=temperature, stochastic=True)
+            samples.append(sample)
+        
+        return torch.stack(samples, dim=0)  # [num_samples, batch_size, num_devices, T]
+    
+    @staticmethod
+    def _sample_gumbel_continuous(logits, temperature):
+        """Apply Gumbel noise for continuous sampling (similar to Gumbel-Softmax but for regression)"""
+        # Add Gumbel noise to introduce randomness in continuous space
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-8) + 1e-8)
+        return (logits + gumbel_noise * temperature).sigmoid()  # Use sigmoid to bound outputs
     
     @staticmethod
     def _apply_optimizations(model, use_8bit, use_half_precision, gradient_checkpointing, device):
