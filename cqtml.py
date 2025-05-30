@@ -167,7 +167,7 @@ class CQTProcessor:
         """Standardize audio length."""
         target_samples = int(self._sr * self._max_duration) if self._max_duration else None
         self.audio, self.original_length = self._standardize_length(y, target_samples)
-
+        
     def _standardize_length(self, y: np.ndarray, target_samples: Optional[int]) -> Tuple[np.ndarray, int]:
         """Trim or pad audio to target length."""
         if target_samples is None:
