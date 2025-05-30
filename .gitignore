@@ -86,3 +86,4 @@ htmlcov/
 # Project specific
 **/temp/
 **/tmp/ 
+todo.txt 
