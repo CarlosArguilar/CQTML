@@ -1,6 +1,6 @@
 import torch
-from freemusic import FreeMusic
-from cqt_vit_model import CQTViTModel
+from data.freemusic import FreeMusic
+from models.cqt_vit_model import CQTViTModel
 
 print("Testing model determinism...")
 

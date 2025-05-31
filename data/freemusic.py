@@ -6,7 +6,7 @@ from __future__ import print_function
 import torch.utils.data as data
 import numpy as np
 import torch
-from datasets import load_dataset
+import datasets
 import librosa
 from typing import List, Tuple, Dict, Optional, Callable, Union
 import math
@@ -17,7 +17,7 @@ import hashlib
 import json
 from pathlib import Path
 from functools import lru_cache
-from cqtml import CQTProcessor
+from core.cqtml import CQTProcessor
 
 class FreeMusic(data.Dataset):
     """Free Music Archive Dataset.
@@ -71,7 +71,7 @@ class FreeMusic(data.Dataset):
             self._cqt_cache = {}
         
         # Load the dataset
-        self.dataset = load_dataset("benjamin-paine/free-music-archive-small")
+        self.dataset = datasets.load_dataset("benjamin-paine/free-music-archive-small")
         self.train_dataset = self.dataset["train"]
         self.num_files = len(self.train_dataset)
         

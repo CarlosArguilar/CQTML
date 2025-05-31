@@ -1,7 +1,7 @@
 import torch
-from freemusic import FreeMusic
-from cqt_vit_model import CQTViTModel
-from comparison_dataset_generator import ComparisonDatasetGenerator
+from data.freemusic import FreeMusic
+from models.cqt_vit_model import CQTViTModel
+from preferences.comparison_dataset_generator import ComparisonDatasetGenerator
 
 print("Testing advanced stochastic generation for comparison dataset...")
 
