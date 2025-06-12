@@ -68,7 +68,6 @@ output/
 *.onnx
 *.savedmodel
 checkpoints/
-models/
 pretrained/
 
 # IDE specific files
