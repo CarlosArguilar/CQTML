@@ -9,14 +9,14 @@ from cqtml_interface.api import compare_signals
 
 class ComparisonDatasetGenerator:
     """
-    Generates comparison datasets by running model inference twice on the same input
+    Generates comparison datasets by running model inference with different configurations
     and determining preferences using cqtml_interface.api.compare_signals
     """
     
     def __init__(self, model, dataset, save_path="comparison_dataset.pkl"):
         """
         Args:
-            model: The CQT ViT model to generate outputs
+            model: The GRPO-compatible CQT ViT model to generate outputs
             dataset: The FreeMusic dataset with CQT format
             save_path: Path to save the comparison dataset
         """
@@ -27,17 +27,19 @@ class ComparisonDatasetGenerator:
         
     def generate_comparison_dataset(self, num_samples=100, batch_size=1, 
                                    subset_indices=None, verbose=True, 
-                                   temperature=1.2, use_stochastic=True):
+                                   temperature_a=0.5, temperature_b=1.5,
+                                   actions_per_sample=2):
         """
-        Generate comparison dataset using model's stochastic generation capabilities
+        Generate comparison dataset using model's GRPO-compatible action generation
         
         Args:
             num_samples: Number of comparison pairs to generate
             batch_size: Batch size for inference (keep small for diversity)
             subset_indices: Specific indices to use from dataset
             verbose: Show progress bar
-            temperature: Temperature for stochastic sampling (higher = more random)
-            use_stochastic: Use model's stochastic generation mode
+            temperature_a: Temperature for first action generation (lower = more deterministic)
+            temperature_b: Temperature for second action generation (higher = more exploratory)
+            actions_per_sample: Number of actions to generate per sample (we'll pick best/worst)
         """
         # Create subset if specified
         if subset_indices is not None:
@@ -60,20 +62,6 @@ class ComparisonDatasetGenerator:
         for batch_idx, batch_data in enumerate(progress_bar):
             batch_data = batch_data.to(device)
             
-            with torch.no_grad():
-                if use_stochastic and hasattr(self.model, 'generate_stochastic'):
-                    # Use model's built-in stochastic generation
-                    output_a = self.model.generate_deterministic(batch_data)
-                    output_b = self.model.generate_stochastic(batch_data, temperature=temperature)
-                elif use_stochastic:
-                    # Fallback: use forward with different temperature settings
-                    output_a = self.model(batch_data, temperature=1.0, stochastic=False)
-                    output_b = self.model(batch_data, temperature=temperature, stochastic=True)
-                else:
-                    # Generate two deterministic outputs (should be identical, for testing)
-                    output_a = self.model(batch_data)
-                    output_b = self.model(batch_data)
-            
             # Process each sample in the batch
             for i in range(batch_data.size(0)):
                 # Get the actual dataset index for this sample
@@ -83,26 +71,51 @@ class ComparisonDatasetGenerator:
                 file_idx, local_chunk_idx = self.dataset.chunk_to_file_map[actual_idx]
                 audio_sample = self.dataset._get_audio_chunk(file_idx, local_chunk_idx).cpu()
                 
-                # CQT input and model outputs
-                input_sample = batch_data[i].cpu()  # Original CQT input tensor
-                output_a_sample = output_a[i].cpu()  # Model output A (deterministic)
-                output_b_sample = output_b[i].cpu()  # Model output B (stochastic)
+                # CQT input sample
+                input_sample = batch_data[i:i+1]  # Keep batch dimension for model
                 
-                # Compare the two outputs using original audio for playback
                 try:
+                    # Generate actions with different temperatures for comparison
+                    actions_a = self.model.generate_actions(
+                        states=[input_sample.squeeze(0).cpu()],  # Remove batch dim, move to CPU
+                        num_actions_per_state=actions_per_sample,
+                        temperature=temperature_a
+                    )
+                    
+                    actions_b = self.model.generate_actions(
+                        states=[input_sample.squeeze(0).cpu()],  # Remove batch dim, move to CPU  
+                        num_actions_per_state=actions_per_sample,
+                        temperature=temperature_b
+                    )
+                    
+                    # Select representative actions
+                    # For temperature_a (lower), select first action (more deterministic)
+                    # For temperature_b (higher), select action with highest variance (most exploratory)
+                    output_a_sample = torch.tensor(actions_a[0][0], dtype=torch.float32)  # First action
+                    
+                    # For output_b, select the action with highest variance
+                    if len(actions_b[0]) > 1:
+                        variances = [np.var(action) for action in actions_b[0]]
+                        most_diverse_idx = np.argmax(variances)
+                        output_b_sample = torch.tensor(actions_b[0][most_diverse_idx], dtype=torch.float32)
+                    else:
+                        output_b_sample = torch.tensor(actions_b[0][0], dtype=torch.float32)
+                    
+                    # Compare the two outputs using original audio for playback
                     # compare_signals expects: (audio_tensor, signal_tensor_a, signal_tensor_b)
                     # audio_tensor: 1D audio for playback, signal tensors: device activations
                     preference = compare_signals(audio_sample, output_a_sample, output_b_sample)
                     
                     # Store the comparison (convert to numpy for storage)
                     comparison = {
-                        'input': input_sample.numpy(),  # Original CQT input
+                        'input': input_sample.squeeze(0).cpu().numpy(),  # Original CQT input
                         'audio': audio_sample.numpy(),  # Original audio
-                        'output_a': output_a_sample.numpy(),  # Model output A (deterministic)
-                        'output_b': output_b_sample.numpy(),  # Model output B (stochastic)
+                        'output_a': output_a_sample.numpy(),  # Model output A (lower temp)
+                        'output_b': output_b_sample.numpy(),  # Model output B (higher temp)
                         'preference': preference,  # Result from compare_signals
-                        'temperature': temperature,  # Temperature used for stochastic generation
-                        'use_stochastic': use_stochastic,  # Whether stochastic mode was used
+                        'temperature_a': temperature_a,  # Temperature used for output A
+                        'temperature_b': temperature_b,  # Temperature used for output B
+                        'actions_per_sample': actions_per_sample,  # Number of actions generated
                         'batch_idx': batch_idx,
                         'sample_idx': i,
                         'actual_idx': actual_idx
@@ -114,7 +127,8 @@ class ComparisonDatasetGenerator:
                         progress_bar.set_postfix({
                             'comparisons': len(self.comparisons),
                             'last_pref': preference,
-                            'temperature': temperature
+                            'temp_a': temperature_a,
+                            'temp_b': temperature_b
                         })
                         
                 except Exception as e:
@@ -124,8 +138,109 @@ class ComparisonDatasetGenerator:
         
         if verbose:
             print(f"Generated {len(self.comparisons)} comparison pairs")
-            print(f"Used temperature: {temperature}")
-            print(f"Stochastic mode: {use_stochastic}")
+            print(f"Temperature A: {temperature_a} (more deterministic)")
+            print(f"Temperature B: {temperature_b} (more exploratory)")
+            print(f"Actions per sample: {actions_per_sample}")
+            self._print_statistics()
+    
+    def generate_comparison_dataset_single_temp(self, num_samples=100, batch_size=1,
+                                               subset_indices=None, verbose=True,
+                                               temperature=1.2, actions_per_sample=4):
+        """
+        Generate comparison dataset using multiple actions at the same temperature
+        
+        Args:
+            num_samples: Number of comparison pairs to generate
+            batch_size: Batch size for inference
+            subset_indices: Specific indices to use from dataset
+            verbose: Show progress bar
+            temperature: Temperature for action generation
+            actions_per_sample: Number of actions to generate per sample (select best vs worst)
+        """
+        # Create subset if specified
+        if subset_indices is not None:
+            subset = Subset(self.dataset, subset_indices[:num_samples])
+        else:
+            indices = list(range(min(num_samples, len(self.dataset))))
+            subset = Subset(self.dataset, indices)
+        
+        dataloader = DataLoader(subset, batch_size=batch_size, shuffle=False)
+        self.model.eval()
+        
+        if verbose:
+            progress_bar = tqdm(dataloader, desc="Generating comparisons (single temp)")
+        else:
+            progress_bar = dataloader
+        
+        for batch_idx, batch_data in enumerate(progress_bar):
+            for i in range(batch_data.size(0)):
+                actual_idx = subset.indices[batch_idx * batch_size + i] if hasattr(subset, 'indices') else batch_idx * batch_size + i
+                
+                # Get audio and input
+                file_idx, local_chunk_idx = self.dataset.chunk_to_file_map[actual_idx]
+                audio_sample = self.dataset._get_audio_chunk(file_idx, local_chunk_idx).cpu()
+                input_sample = batch_data[i:i+1]
+                
+                try:
+                    # Generate multiple actions at same temperature
+                    actions = self.model.generate_actions(
+                        states=[input_sample.squeeze(0).cpu()],
+                        num_actions_per_state=actions_per_sample,
+                        temperature=temperature
+                    )
+                    
+                    # Select most and least diverse actions
+                    action_list = actions[0]
+                    if len(action_list) >= 2:
+                        # Calculate variance for each action
+                        variances = [np.var(action) for action in action_list]
+                        
+                        # Select least diverse (most consistent) and most diverse
+                        least_diverse_idx = np.argmin(variances)
+                        most_diverse_idx = np.argmax(variances)
+                        
+                        output_a_sample = torch.tensor(action_list[least_diverse_idx], dtype=torch.float32)
+                        output_b_sample = torch.tensor(action_list[most_diverse_idx], dtype=torch.float32)
+                    else:
+                        # Fallback: use the same action (should result in tie)
+                        output_a_sample = torch.tensor(action_list[0], dtype=torch.float32)
+                        output_b_sample = torch.tensor(action_list[0], dtype=torch.float32)
+                    
+                    # Compare outputs
+                    preference = compare_signals(audio_sample, output_a_sample, output_b_sample)
+                    
+                    comparison = {
+                        'input': input_sample.squeeze(0).cpu().numpy(),
+                        'audio': audio_sample.numpy(),
+                        'output_a': output_a_sample.numpy(),  # Less diverse
+                        'output_b': output_b_sample.numpy(),  # More diverse
+                        'preference': preference,
+                        'temperature': temperature,
+                        'actions_per_sample': actions_per_sample,
+                        'comparison_type': 'single_temperature_variance',
+                        'batch_idx': batch_idx,
+                        'sample_idx': i,
+                        'actual_idx': actual_idx
+                    }
+                    
+                    self.comparisons.append(comparison)
+                    
+                    if verbose and len(self.comparisons) % 10 == 0:
+                        progress_bar.set_postfix({
+                            'comparisons': len(self.comparisons),
+                            'last_pref': preference,
+                            'temp': temperature
+                        })
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f"Warning: Comparison failed for sample {batch_idx}:{i}: {e}")
+                    continue
+        
+        if verbose:
+            print(f"Generated {len(self.comparisons)} comparison pairs (single temperature)")
+            print(f"Temperature: {temperature}")
+            print(f"Actions per sample: {actions_per_sample}")
             self._print_statistics()
     
     def _print_statistics(self):
@@ -154,7 +269,8 @@ class ComparisonDatasetGenerator:
             'metadata': {
                 'num_comparisons': len(self.comparisons),
                 'model_info': str(type(self.model).__name__),
-                'dataset_info': str(type(self.dataset).__name__)
+                'dataset_info': str(type(self.dataset).__name__),
+                'generation_method': 'grpo_compatible'
             }
         }
         
@@ -209,17 +325,19 @@ class ComparisonDatasetGenerator:
     
     @staticmethod
     def create_quick_comparison_dataset(model, dataset, num_samples=50, save_path=None, 
-                                       temperature=1.2, use_stochastic=True):
+                                       temperature_a=0.5, temperature_b=1.5, 
+                                       comparison_method='dual_temperature'):
         """
         Quick utility method to generate a small comparison dataset
         
         Args:
-            model: CQT ViT model
+            model: GRPO-compatible CQT ViT model
             dataset: FreeMusic dataset with CQT format  
             num_samples: Number of comparison pairs
             save_path: Path to save dataset
-            temperature: Temperature for stochastic sampling (higher = more random)
-            use_stochastic: Use model's stochastic generation mode
+            temperature_a: Lower temperature for more deterministic actions
+            temperature_b: Higher temperature for more exploratory actions
+            comparison_method: 'dual_temperature' or 'single_temperature'
         """
         generator = ComparisonDatasetGenerator(
             model=model, 
@@ -227,13 +345,21 @@ class ComparisonDatasetGenerator:
             save_path=save_path or "quick_comparison_dataset.pkl"
         )
         
-        generator.generate_comparison_dataset(
-            num_samples=num_samples,
-            batch_size=1,
-            verbose=True,
-            temperature=temperature,
-            use_stochastic=use_stochastic
-        )
+        if comparison_method == 'dual_temperature':
+            generator.generate_comparison_dataset(
+                num_samples=num_samples,
+                batch_size=1,
+                verbose=True,
+                temperature_a=temperature_a,
+                temperature_b=temperature_b
+            )
+        else:  # single_temperature
+            generator.generate_comparison_dataset_single_temp(
+                num_samples=num_samples,
+                batch_size=1,
+                verbose=True,
+                temperature=(temperature_a + temperature_b) / 2
+            )
         
         saved_path = generator.save_dataset()
         return generator, saved_path
@@ -241,25 +367,34 @@ class ComparisonDatasetGenerator:
 
 # Utility function for easy dataset generation
 def generate_comparison_dataset(model, dataset, num_samples=100, save_path="comparison_dataset.pkl", 
-                              temperature=1.2, use_stochastic=True):
+                              temperature_a=0.5, temperature_b=1.5, comparison_method='dual_temperature'):
     """
-    Simple function to generate comparison dataset
+    Simple function to generate comparison dataset with GRPO-compatible model
     
     Args:
-        model: CQT ViT model
+        model: GRPO-compatible CQT ViT model
         dataset: FreeMusic dataset with CQT format
         num_samples: Number of comparison pairs
         save_path: Where to save the dataset
-        temperature: Temperature for stochastic sampling (higher = more random)
-        use_stochastic: Use model's stochastic generation mode
+        temperature_a: Lower temperature for more deterministic actions  
+        temperature_b: Higher temperature for more exploratory actions
+        comparison_method: 'dual_temperature' or 'single_temperature'
         
     Returns:
         Path to saved dataset
     """
     generator = ComparisonDatasetGenerator(model, dataset, save_path)
-    generator.generate_comparison_dataset(
-        num_samples=num_samples, 
-        temperature=temperature, 
-        use_stochastic=use_stochastic
-    )
+    
+    if comparison_method == 'dual_temperature':
+        generator.generate_comparison_dataset(
+            num_samples=num_samples, 
+            temperature_a=temperature_a, 
+            temperature_b=temperature_b
+        )
+    else:  # single_temperature
+        generator.generate_comparison_dataset_single_temp(
+            num_samples=num_samples,
+            temperature=(temperature_a + temperature_b) / 2
+        )
+    
     return generator.save_dataset() 

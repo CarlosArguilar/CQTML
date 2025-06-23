@@ -11,13 +11,14 @@ class AudioProcessor:
     Manages audio timing and synchronization with signal visualization.
     """
     
-    def __init__(self, audio_tensor, sample_rate):
+    def __init__(self, audio_tensor, sample_rate, volume_boost=3.0):
         """
         Initialize the audio processor.
         
         Args:
             audio_tensor (torch.Tensor): Audio tensor (mono)
             sample_rate (int): Audio sample rate in Hz
+            volume_boost (float): Volume amplification factor (default: 3.0)
         """
         self.audio_tensor = audio_tensor
         self.sample_rate = sample_rate
@@ -25,25 +26,49 @@ class AudioProcessor:
         self.playing = False
         self.current_time = 0.0
         self.channel = None
+        self.volume_boost = volume_boost
+        self.runtime_volume = 1.0  # Runtime volume multiplier (0.0 to 10.0+)
+        self.last_prepared_volume = 1.0  # Track last volume used for audio preparation
         
         # Initialize pygame mixer if not already done
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=sample_rate, channels=1)
         
+        # Set global volume to maximum
+        pygame.mixer.music.set_volume(1.0)
+        
+        # Prepare the base audio data (normalized without runtime volume)
+        self._prepare_base_audio()
+        
         # Convert audio tensor to pygame Sound object
         self._prepare_audio()
         
-    def _prepare_audio(self):
-        """Convert the torch tensor to a pygame Sound object"""
-        # Normalize audio to int16 range for WAV format
+    def _prepare_base_audio(self):
+        """Prepare the base audio data without runtime volume"""
+        # Convert tensor to numpy
         audio_np = self.audio_tensor.cpu().numpy()
         
-        # Ensure we have a properly scaled float array between -1 and 1
-        if np.abs(audio_np).max() > 1.0:
-            audio_np = audio_np / np.abs(audio_np).max()
+        # Apply initial volume boost
+        audio_np = audio_np * self.volume_boost
+        
+        # Normalize to prevent clipping but preserve the boosted signal
+        max_val = np.abs(audio_np).max()
+        if max_val > 0:
+            audio_np = audio_np / max_val
+        
+        # Store the normalized base audio for runtime volume application
+        self.base_audio = audio_np
+        
+    def _prepare_audio(self):
+        """Convert the audio to a pygame Sound object with current runtime volume"""
+        # Apply runtime volume to base audio
+        final_audio = self.base_audio * self.runtime_volume
+        
+        # Clip to prevent distortion
+        final_audio = np.clip(final_audio, -1.0, 1.0)
         
         # Convert to int16
-        audio_int16 = (audio_np * 32767).astype(np.int16)
+        audio_int16 = (final_audio * 32767).astype(np.int16)
         
         # Create a WAV file in memory using scipy
         buffer = io.BytesIO()
@@ -52,6 +77,36 @@ class AudioProcessor:
         
         # Load the WAV into pygame Sound object
         self.sound = pygame.mixer.Sound(buffer)
+        
+        # Set pygame volume to maximum since we handle volume in the audio data
+        self.sound.set_volume(1.0)
+        
+        # Update the tracked volume
+        self.last_prepared_volume = self.runtime_volume
+        
+    def _create_audio_from_position(self, start_sample):
+        """Create audio data starting from a specific sample position"""
+        # Get audio data from start position
+        remaining_audio = self.base_audio[start_sample:]
+        
+        # Apply runtime volume
+        final_audio = remaining_audio * self.runtime_volume
+        
+        # Clip to prevent distortion
+        final_audio = np.clip(final_audio, -1.0, 1.0)
+        
+        # Convert to int16
+        audio_int16 = (final_audio * 32767).astype(np.int16)
+        
+        # Create a WAV file in memory
+        buffer = io.BytesIO()
+        wavfile.write(buffer, self.sample_rate, audio_int16)
+        buffer.seek(0)
+        
+        # Create and return a temporary sound
+        temp_sound = pygame.mixer.Sound(buffer)
+        temp_sound.set_volume(1.0)
+        return temp_sound
         
     def play(self, start_time=None):
         """
@@ -67,35 +122,22 @@ class AudioProcessor:
         if self.channel and self.channel.get_busy():
             self.channel.stop()
             
+        # Check if we need to regenerate audio due to volume change
+        if abs(self.runtime_volume - self.last_prepared_volume) > 0.01:
+            self._prepare_audio()
+            
         # We need to re-create the audio from the current position
         if self.current_time > 0 and self.current_time < self.duration:
             # Calculate samples to skip
             start_sample = int(self.current_time * self.sample_rate)
             
-            # Create a new audio tensor starting from the current position
-            remaining_audio = self.audio_tensor[start_sample:]
-            
-            # Create a temporary audio processor with the remaining audio
-            # First, normalize to int16 range
-            audio_np = remaining_audio.cpu().numpy()
-            if np.abs(audio_np).max() > 1.0:
-                audio_np = audio_np / np.abs(audio_np).max()
-            
-            # Convert to int16
-            audio_int16 = (audio_np * 32767).astype(np.int16)
-            
-            # Create a WAV file in memory
-            buffer = io.BytesIO()
-            wavfile.write(buffer, self.sample_rate, audio_int16)
-            buffer.seek(0)
-            
-            # Create a temporary sound for this playback
-            temp_sound = pygame.mixer.Sound(buffer)
+            # Create audio from current position with current volume
+            temp_sound = self._create_audio_from_position(start_sample)
             
             # Play the temporary sound
             self.channel = temp_sound.play()
         else:
-            # Playing from the beginning, use the original sound
+            # Playing from the beginning, use the prepared sound
             self.channel = self.sound.play()
         
         self.playing = True
@@ -166,4 +208,25 @@ class AudioProcessor:
         Returns:
             float: Progress between 0.0 and 1.0
         """
-        return self.get_current_time() / self.duration if self.duration > 0 else 0.0 
+        return self.get_current_time() / self.duration if self.duration > 0 else 0.0
+    
+    def set_runtime_volume(self, volume):
+        """
+        Set the runtime volume multiplier.
+        
+        Args:
+            volume (float): Volume multiplier (0.0 = mute, 1.0 = normal, 10.0 = 10x louder)
+        """
+        old_volume = self.runtime_volume
+        self.runtime_volume = max(0.0, volume)
+        
+        # If volume changed significantly and we're playing, restart playback with new volume
+        if abs(self.runtime_volume - old_volume) > 0.01 and self.playing:
+            current_time = self.get_current_time()
+            self.pause()
+            self.current_time = current_time
+            self.play()
+    
+    def get_runtime_volume(self):
+        """Get the current runtime volume multiplier."""
+        return self.runtime_volume 

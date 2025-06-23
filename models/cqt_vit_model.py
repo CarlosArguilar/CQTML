@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 import types
+from typing import List, Any, Dict
+from torch import Tensor
 
 
 class CQTViTModel:
@@ -10,25 +12,23 @@ class CQTViTModel:
     
     @staticmethod
     def create_model(cqt_shape, num_devices=4, patch_size=16, 
-                    use_8bit=False, use_half_precision=False, 
-                    gradient_checkpointing=False, device='auto',
-                    stochastic_inference=True, dropout_prob=0.1):
+                    distribution_size=32, use_8bit=False, use_half_precision=False, 
+                    gradient_checkpointing=False, device='auto'):
         """
-        Create a ViT model adapted for CQT data with resource efficiency options
+        Create a ViT model adapted for CQT data with log probability distributions for GRPO
         
         Args:
             cqt_shape: Tuple (channels, height, time_dim) from CQT data
             num_devices: Number of output devices (default: 4)
             patch_size: ViT patch size (default: 16)
+            distribution_size: Size of the probability distribution for each output value (default: 32)
             use_8bit: Enable 8-bit quantization for memory efficiency (default: False)
             use_half_precision: Use FP16 for faster inference (default: False)
             gradient_checkpointing: Enable gradient checkpointing to save memory (default: False)
             device: Device placement ('auto', 'cpu', 'cuda', 'mps') (default: 'auto')
-            stochastic_inference: Enable stochastic generation during inference (default: True)
-            dropout_prob: Dropout probability for stochastic inference (default: 0.1)
             
         Returns:
-            Modified ViT model ready for CQT inference
+            Modified ViT model ready for CQT inference with GRPO compatibility
         """
         channels, height, time_dim = cqt_shape
         
@@ -60,22 +60,20 @@ class CQTViTModel:
         # Resize positional embeddings
         CQTViTModel._resize_pos_embeddings(model)
         
-        # Replace classification head with stochastic head
-        if stochastic_inference:
-            model.head = CQTViTModel.StochasticHead(model.head.in_features, num_devices, dropout_prob)
-        else:
-            model.head = nn.Linear(model.head.in_features, num_devices)
+        # Replace classification head with log probability distribution head
+        model.head = CQTViTModel.LogProbabilityHead(model.head.in_features, num_devices, distribution_size)
         
-        # Add stochastic inference parameters
-        model.stochastic_inference = stochastic_inference
-        model.dropout_prob = dropout_prob
+        # Add model parameters
+        model.num_devices = num_devices
+        model.distribution_size = distribution_size
         
         # Replace forward method
         model.forward = types.MethodType(CQTViTModel._forward_cqt, model)
         
-        # Add generation methods
-        model.generate_deterministic = types.MethodType(CQTViTModel._generate_deterministic, model)
-        model.generate_stochastic = types.MethodType(CQTViTModel._generate_stochastic, model)
+        # Add PolicyModel protocol methods
+        model.generate_actions = types.MethodType(CQTViTModel._generate_actions, model)
+        model.get_log_probabilities = types.MethodType(CQTViTModel._get_log_probabilities, model)
+        model.get_parameters = types.MethodType(CQTViTModel._get_parameters, model)
         
         # Apply resource efficiency optimizations
         model = CQTViTModel._apply_optimizations(
@@ -86,35 +84,36 @@ class CQTViTModel:
         print(f"  - 8-bit quantization: {use_8bit}")
         print(f"  - Half precision: {use_half_precision}")
         print(f"  - Gradient checkpointing: {gradient_checkpointing}")
-        print(f"  - Stochastic inference: {stochastic_inference}")
+        print(f"  - Distribution size: {distribution_size}")
         print(f"  - Model size: {CQTViTModel.get_model_memory_usage(model):.1f} MB")
         
         return model
     
-    class StochasticHead(nn.Module):
-        """Stochastic head that enables probabilistic outputs during inference"""
+    class LogProbabilityHead(nn.Module):
+        """Head that outputs log probabilities for each output value"""
         
-        def __init__(self, in_features, out_features, dropout_prob=0.1):
+        def __init__(self, in_features, num_devices, distribution_size):
             super().__init__()
-            self.linear = nn.Linear(in_features, out_features)
-            self.dropout = nn.Dropout(dropout_prob)
-            self.dropout_prob = dropout_prob
+            self.num_devices = num_devices
+            self.distribution_size = distribution_size
             
-        def forward(self, x, temperature=1.0, stochastic=True):
-            # Apply dropout during inference if stochastic mode is enabled
-            if stochastic and self.training:
-                x = self.dropout(x)
-            elif stochastic and not self.training:
-                # Apply dropout even during eval if stochastic inference is requested
-                x = F.dropout(x, p=self.dropout_prob, training=True)
+            # Linear layer to produce logits for all devices and distribution bins
+            self.linear = nn.Linear(in_features, num_devices * distribution_size)
             
-            logits = self.linear(x)
+        def forward(self, x):
+            # x shape: [batch_size, num_patches, in_features]
+            batch_size, num_patches, _ = x.shape
             
-            if stochastic and temperature != 1.0:
-                # Apply temperature scaling for sampling
-                logits = logits / temperature
+            # Get logits
+            logits = self.linear(x)  # [batch_size, num_patches, num_devices * distribution_size]
             
-            return logits
+            # Reshape to separate devices and distribution dimensions
+            logits = logits.view(batch_size, num_patches, self.num_devices, self.distribution_size)
+            
+            # Apply log_softmax to get log probabilities
+            log_probs = F.log_softmax(logits, dim=-1)
+            
+            return log_probs  # [batch_size, num_patches, num_devices, distribution_size]
 
     @staticmethod
     def _resize_pos_embeddings(model):
@@ -149,13 +148,9 @@ class CQTViTModel:
             model.pos_embed = nn.Parameter(torch.cat([class_token, new_patch_embeddings], dim=1))
     
     @staticmethod
-    def _forward_cqt(self, x, temperature=1.0, stochastic=None):
-        """Custom forward method for CQT data with stochastic generation"""
+    def _forward_cqt(self, x):
+        """Custom forward method for CQT data returning log probabilities"""
         T = x.shape[-1]  # Get time dimension
-        
-        # Determine if we should use stochastic mode
-        if stochastic is None:
-            stochastic = getattr(self, 'stochastic_inference', False)
         
         # Convert to same dtype as model if using half precision
         if next(self.parameters()).dtype == torch.float16:
@@ -164,50 +159,155 @@ class CQTViTModel:
         # Standard ViT forward pass
         x = self.forward_features(x)  # [batch_size, num_patches, embed_dim]
         
-        # Pass through head with stochastic options
-        if hasattr(self.head, 'forward') and hasattr(self.head, 'dropout_prob'):
-            # Stochastic head
-            x = self.head(x, temperature=temperature, stochastic=stochastic)
-        else:
-            # Regular head
-            x = self.head(x)
+        # Pass through log probability head
+        log_probs = self.head(x)  # [batch_size, num_patches, num_devices, distribution_size]
         
-        # Reshape to target format [batch_size, num_devices, T]
-        x = x.transpose(1, 2)  # [batch_size, num_devices, num_patches]
-        x = nn.functional.interpolate(x, size=T, mode='linear', align_corners=False)
+        # Interpolate to match target time dimension
+        batch_size, num_patches, num_devices, distribution_size = log_probs.shape
         
-        # Apply sampling if in stochastic mode and temperature != 1.0
-        if stochastic and temperature != 1.0:
-            # Sample from the distribution using Gumbel sampling for continuous outputs
-            x = CQTViTModel._sample_gumbel_continuous(x, temperature)
+        # Reshape for interpolation: [batch_size * num_devices * distribution_size, 1, num_patches]
+        log_probs_reshaped = log_probs.permute(0, 2, 3, 1).reshape(
+            batch_size * num_devices * distribution_size, 1, num_patches
+        )
         
-        return x
+        # Interpolate to target time dimension
+        log_probs_interpolated = F.interpolate(
+            log_probs_reshaped, size=T, mode='linear', align_corners=False
+        )
+        
+        # Reshape back to target format: [batch_size, num_devices, T, distribution_size]
+        log_probs_final = log_probs_interpolated.reshape(
+            batch_size, num_devices, distribution_size, T
+        ).permute(0, 1, 3, 2)
+        
+        # Re-normalize after interpolation to ensure proper probability distributions
+        log_probs_final = F.log_softmax(log_probs_final, dim=-1)
+        
+        return log_probs_final
     
     @staticmethod
-    def _generate_deterministic(self, x):
-        """Generate deterministic output (standard forward pass)"""
-        return self.forward(x, temperature=1.0, stochastic=False)
+    def _generate_actions(self, states: List[Any], num_actions_per_state: int, **generation_kwargs: Any) -> List[List[Any]]:
+        """
+        Generate multiple actions for each state/input.
+        
+        Args:
+            states: List of input CQT tensors
+            num_actions_per_state: Number of actions to generate per state
+            **generation_kwargs: Additional generation parameters (e.g., temperature)
+            
+        Returns:
+            List of lists, where each inner list contains actions for one state
+        """
+        temperature = generation_kwargs.get('temperature', 1.0)
+        all_actions = []
+        
+        # Process each state
+        for state in states:
+            state_actions = []
+            
+            # Convert state to tensor if needed
+            if not isinstance(state, torch.Tensor):
+                state = torch.tensor(state, dtype=torch.float32)
+            
+            # Ensure state has batch dimension
+            if state.dim() == 3:  # [channels, height, time]
+                state = state.unsqueeze(0)  # [1, channels, height, time]
+            
+            # Move to same device as model
+            state = state.to(next(self.parameters()).device)
+            
+            # Generate multiple actions for this state
+            for _ in range(num_actions_per_state):
+                with torch.no_grad():
+                    # Get log probabilities
+                    log_probs = self.forward(state)  # [1, num_devices, T, distribution_size]
+                    
+                    # Apply temperature scaling
+                    if temperature != 1.0:
+                        log_probs = log_probs / temperature
+                    
+                    # Sample from the distribution with numerical stability
+                    # Subtract max for numerical stability before exp
+                    log_probs_stable = log_probs - log_probs.max(dim=-1, keepdim=True)[0]
+                    probs = torch.exp(log_probs_stable)
+                    
+                    # Ensure probabilities are positive (numerical stability)
+                    probs = torch.clamp(probs, min=1e-8)
+                    
+                    # Sample indices from the categorical distribution
+                    sampled_indices = torch.multinomial(
+                        probs.reshape(-1, self.distribution_size), 
+                        num_samples=1
+                    ).reshape(1, self.num_devices, -1)
+                    
+                    # Convert indices to continuous values [0, 1]
+                    action = sampled_indices.float() / (self.distribution_size - 1)
+                    
+                    # Remove batch dimension and convert to numpy
+                    action = action.squeeze(0).cpu().numpy()
+                    state_actions.append(action)
+            
+            all_actions.append(state_actions)
+        
+        return all_actions
     
     @staticmethod
-    def _generate_stochastic(self, x, temperature=1.0, num_samples=1):
-        """Generate stochastic outputs with temperature sampling"""
-        if num_samples == 1:
-            return self.forward(x, temperature=temperature, stochastic=True)
+    def _get_log_probabilities(self, states: List[Any], actions: List[Any]) -> Tensor:
+        """
+        Calculate log probabilities of actions given states.
         
-        # Generate multiple samples
-        samples = []
-        for _ in range(num_samples):
-            sample = self.forward(x, temperature=temperature, stochastic=True)
-            samples.append(sample)
+        Args:
+            states: List of input CQT tensors
+            actions: List of corresponding actions (2D tensors with shape [num_devices, T])
+            
+        Returns:
+            Tensor of log probabilities for each (state, action) pair
+        """
+        log_probs_list = []
         
-        return torch.stack(samples, dim=0)  # [num_samples, batch_size, num_devices, T]
+        for state, action in zip(states, actions):
+            # Convert to tensors if needed
+            if not isinstance(state, torch.Tensor):
+                state = torch.tensor(state, dtype=torch.float32)
+            if not isinstance(action, torch.Tensor):
+                action = torch.tensor(action, dtype=torch.float32)
+            
+            # Ensure state has batch dimension
+            if state.dim() == 3:
+                state = state.unsqueeze(0)
+            
+            # Move to same device as model
+            state = state.to(next(self.parameters()).device)
+            action = action.to(next(self.parameters()).device)
+            
+            # Get log probabilities from model (WITH gradients for training)
+            model_log_probs = self.forward(state)  # [1, num_devices, T, distribution_size]
+            
+            # Convert continuous action values [0, 1] to discrete indices
+            action_indices = (action * (self.distribution_size - 1)).long()
+            action_indices = torch.clamp(action_indices, 0, self.distribution_size - 1)
+            
+            # Gather log probabilities for the specific actions
+            batch_size, num_devices, T, _ = model_log_probs.shape
+            
+            # Expand action_indices to match model_log_probs dimensions
+            action_indices = action_indices.unsqueeze(0)  # [1, num_devices, T]
+            action_indices = action_indices.unsqueeze(-1)  # [1, num_devices, T, 1]
+            
+            # Gather the log probabilities
+            action_log_probs = torch.gather(model_log_probs, dim=-1, index=action_indices)
+            action_log_probs = action_log_probs.squeeze(-1)  # [1, num_devices, T]
+            
+            # Sum over devices and time to get single log probability for this (state, action) pair
+            total_log_prob = action_log_probs.sum()
+            log_probs_list.append(total_log_prob)
+        
+        return torch.stack(log_probs_list)
     
     @staticmethod
-    def _sample_gumbel_continuous(logits, temperature):
-        """Apply Gumbel noise for continuous sampling (similar to Gumbel-Softmax but for regression)"""
-        # Add Gumbel noise to introduce randomness in continuous space
-        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-8) + 1e-8)
-        return (logits + gumbel_noise * temperature).sigmoid()  # Use sigmoid to bound outputs
+    def _get_parameters(self) -> Dict[str, Tensor]:
+        """Get model parameters for optimization."""
+        return {name: param for name, param in self.named_parameters()}
     
     @staticmethod
     def _apply_optimizations(model, use_8bit, use_half_precision, gradient_checkpointing, device):

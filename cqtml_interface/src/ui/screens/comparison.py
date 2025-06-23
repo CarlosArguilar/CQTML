@@ -4,6 +4,7 @@ from ...ui.theme import COLORS, SIZES, FONTS
 from ...ui.components.button import Button
 from ...ui.components.timeline import Timeline
 from ...ui.components.device_renderer import DeviceRenderer
+from ...ui.components.volume_slider import VolumeSlider
 from ...core.signal_processor import SignalProcessor
 from ...core.audio_processor import AudioProcessor
 
@@ -48,9 +49,23 @@ class ComparisonScreen:
             style="primary"
         )
         
+        # Volume slider - positioned in bottom right corner
+        volume_slider_width = 120
+        volume_slider_x = self.screen_width - volume_slider_width - SIZES['padding']
+        volume_slider_y = self.screen_height - 40 - SIZES['padding']  # 40px from bottom
+        self.volume_slider = VolumeSlider(
+            volume_slider_x,
+            volume_slider_y,
+            width=volume_slider_width,
+            height=20,
+            initial_volume=1.0,
+            min_volume=0.0,
+            max_volume=10.0
+        )
+        
         # Timeline (shared between both visualizations)
         timeline_y = button_y - SIZES['timeline_height'] - SIZES['padding'] * 2
-        timeline_width = int(self.screen_width * 0.7)  # 70% of screen width
+        timeline_width = int(self.screen_width * 0.7)  # Restored full width since volume slider moved
         timeline_x = (self.screen_width - timeline_width) // 2
         self.timeline = Timeline(
             timeline_x,
@@ -156,8 +171,8 @@ class ComparisonScreen:
         self.signal_processor_top = SignalProcessor(signal_tensor_left, duration, max_value)
         self.signal_processor_bottom = SignalProcessor(signal_tensor_right, duration, max_value)
         
-        # Create audio processor
-        self.audio_processor = AudioProcessor(audio_tensor, sample_rate)
+        # Create audio processor with volume boost
+        self.audio_processor = AudioProcessor(audio_tensor, sample_rate, volume_boost=1.0)
         
         # Synchronize durations
         self.signal_processor_top.synchronize_with_audio(audio_tensor, sample_rate)
@@ -224,6 +239,11 @@ class ComparisonScreen:
         progress = self.audio_processor.get_progress()
         self.timeline.update_progress(progress, current_time, duration)
         
+        # Update audio volume from slider
+        if hasattr(self, 'volume_slider'):
+            current_volume = self.volume_slider.get_volume()
+            self.audio_processor.set_runtime_volume(current_volume)
+        
         # Update device values
         if self.signal_processor_top:
             self.device_renderer_top.update_values(current_time)
@@ -275,6 +295,10 @@ class ComparisonScreen:
         # Draw timeline
         self.timeline.draw(surface)
         
+        # Draw volume slider
+        if hasattr(self, 'volume_slider'):
+            self.volume_slider.draw(surface)
+        
         # Draw play/pause button
         self.play_button.draw(surface)
         
@@ -298,6 +322,10 @@ class ComparisonScreen:
             
         # Handle timeline
         if self.timeline.handle_event(event):
+            return True
+            
+        # Handle volume slider
+        if hasattr(self, 'volume_slider') and self.volume_slider.handle_event(event):
             return True
             
         # Handle selection buttons
